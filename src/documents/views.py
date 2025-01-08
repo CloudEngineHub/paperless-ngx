@@ -75,7 +75,6 @@ from documents import index
 from documents.bulk_download import ArchiveOnlyStrategy
 from documents.bulk_download import OriginalAndArchiveStrategy
 from documents.bulk_download import OriginalsOnlyStrategy
-from documents.caching import CACHE_50_MINUTES
 from documents.caching import get_metadata_cache
 from documents.caching import get_suggestion_cache
 from documents.caching import refresh_metadata_cache
@@ -469,6 +468,7 @@ class DocumentViewSet(
             return None
 
     @action(methods=["get"], detail=True)
+    @method_decorator(cache_control(no_cache=True))
     @method_decorator(
         condition(etag_func=metadata_etag, last_modified_func=metadata_last_modified),
     )
@@ -527,6 +527,7 @@ class DocumentViewSet(
         return Response(meta)
 
     @action(methods=["get"], detail=True)
+    @method_decorator(cache_control(no_cache=True))
     @method_decorator(
         condition(
             etag_func=suggestions_etag,
@@ -577,7 +578,7 @@ class DocumentViewSet(
         return Response(resp_data)
 
     @action(methods=["get"], detail=True)
-    @method_decorator(cache_control(public=False, max_age=5 * 60))
+    @method_decorator(cache_control(no_cache=True))
     @method_decorator(
         condition(etag_func=preview_etag, last_modified_func=preview_last_modified),
     )
@@ -589,7 +590,7 @@ class DocumentViewSet(
             raise Http404
 
     @action(methods=["get"], detail=True)
-    @method_decorator(cache_control(public=False, max_age=CACHE_50_MINUTES))
+    @method_decorator(cache_control(no_cache=True))
     @method_decorator(last_modified(thumbnail_last_modified))
     def thumb(self, request, pk=None):
         try:
@@ -1583,9 +1584,14 @@ class BulkDownloadView(GenericAPIView):
         serializer.is_valid(raise_exception=True)
 
         ids = serializer.validated_data.get("documents")
+        documents = Document.objects.filter(pk__in=ids)
         compression = serializer.validated_data.get("compression")
         content = serializer.validated_data.get("content")
         follow_filename_format = serializer.validated_data.get("follow_formatting")
+
+        for document in documents:
+            if not has_perms_owner_aware(request.user, "view_document", document):
+                return HttpResponseForbidden("Insufficient permissions")
 
         settings.SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
         temp = tempfile.NamedTemporaryFile(  # noqa: SIM115
@@ -1603,7 +1609,7 @@ class BulkDownloadView(GenericAPIView):
 
         with zipfile.ZipFile(temp.name, "w", compression) as zipf:
             strategy = strategy_class(zipf, follow_filename_format)
-            for document in Document.objects.filter(pk__in=ids):
+            for document in documents:
                 strategy.add_document(document)
 
         # TODO(stumpylog): Investigate using FileResponse here
@@ -1711,10 +1717,12 @@ class UiSettingsView(GenericAPIView):
             manager = PaperlessMailOAuth2Manager()
             if settings.GMAIL_OAUTH_ENABLED:
                 ui_settings["gmail_oauth_url"] = manager.get_gmail_authorization_url()
+                request.session["oauth_state"] = manager.state
             if settings.OUTLOOK_OAUTH_ENABLED:
                 ui_settings["outlook_oauth_url"] = (
                     manager.get_outlook_authorization_url()
                 )
+                request.session["oauth_state"] = manager.state
 
         ui_settings["email_enabled"] = settings.EMAIL_ENABLED
 
@@ -2138,7 +2146,7 @@ class SystemStatusView(PassUserMixin):
         classifier_error = None
         classifier_status = None
         try:
-            classifier = load_classifier()
+            classifier = load_classifier(raise_exception=True)
             if classifier is None:
                 # Make sure classifier should exist
                 docs_queryset = Document.objects.exclude(
@@ -2158,7 +2166,7 @@ class SystemStatusView(PassUserMixin):
                             matching_algorithm=Tag.MATCH_AUTO,
                         ).exists()
                     )
-                    and not os.path.isfile(settings.MODEL_FILE)
+                    and not settings.MODEL_FILE.exists()
                 ):
                     # if classifier file doesn't exist just classify as a warning
                     classifier_error = "Classifier file does not exist (yet). Re-training may be pending."
