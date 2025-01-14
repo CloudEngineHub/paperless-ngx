@@ -585,10 +585,13 @@ services:
 ### Case Sensitivity
 
 The database interface does not provide a method to configure a MySQL
-database to be case sensitive. This would prevent a user from creating a
+database to be case-sensitive. A case-**in**sensitive database prevents a user from creating a
 tag `Name` and `NAME` as they are considered the same.
 
-Per Django documentation, to enable this requires manual intervention.
+However, there is a downside to turning on case sensitivity, as it also makes searches case-sensitive,
+so for example a document with the title `Invoice` won't be found when searching for `invoice`.
+
+Per Django documentation, making a database case-sensitive requires manual intervention.
 To enable case sensitive tables, you can execute the following command
 against each table:
 
@@ -604,6 +607,8 @@ existing tables) with:
     Using mariadb version 10.4+ is recommended. Using the `utf8mb3` character set on
     an older system may fix issues that can arise while setting up Paperless-ngx but
     `utf8mb3` can cause issues with consumption (where `utf8mb4` does not).
+
+For more information on this topic, you can refer to [this](https://code.djangoproject.com/ticket/9682) Django issue.
 
 ### Missing timezones
 
@@ -806,13 +811,13 @@ gpg --decrypt name_of_file.asc
 
 First, enable the [PAPERLESS_ENABLE_GPG_DECRYPTOR environment variable](configuration.md#PAPERLESS_ENABLE_GPG_DECRYPTOR).
 
-Then determine your local `gpg-agent.extra` socket by invoking
+Then determine your local `gpg-agent` socket by invoking
 
 ```
-gpgconf --list-dir agent-extra-socket
+gpgconf --list-dir agent-socket
 ```
 
-on your host. A possible output is `~/.gnupg/S.gpg-agent.extra`.
+on your host. A possible output is `~/.gnupg/S.gpg-agent`.
 Also find the location of your public keyring.
 
 If using docker, you'll need to add the following volume mounts to your `docker-compose.yml` file:
@@ -821,7 +826,7 @@ If using docker, you'll need to add the following volume mounts to your `docker-
 webserver:
     volumes:
         - /home/user/.gnupg/pubring.gpg:/usr/src/paperless/.gnupg/pubring.gpg
-        - <path to gpg-agent.extra socket>:/usr/src/paperless/.gnupg/S.gpg-agent
+        - <path to gpg-agent socket>:/usr/src/paperless/.gnupg/S.gpg-agent
 ```
 
 For a 'bare-metal' installation no further configuration is necessary. If you
