@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+from pathlib import Path
 
 import httpx
 from celery import shared_task
@@ -10,6 +11,7 @@ from celery.signals import task_failure
 from celery.signals import task_postrun
 from celery.signals import task_prerun
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.core.mail import EmailMessage
 from django.db import DatabaseError
 from django.db import close_old_connections
@@ -28,9 +30,11 @@ from documents.data_models import DocumentMetadataOverrides
 from documents.file_handling import create_source_path_directory
 from documents.file_handling import delete_empty_directories
 from documents.file_handling import generate_unique_filename
+from documents.models import Correspondent
 from documents.models import CustomField
 from documents.models import CustomFieldInstance
 from documents.models import Document
+from documents.models import DocumentType
 from documents.models import MatchingModel
 from documents.models import PaperlessTask
 from documents.models import Tag
@@ -539,19 +543,27 @@ def add_to_index(sender, document, **kwargs):
     index.add_or_update_document(document)
 
 
-def run_workflows_added(sender, document: Document, logging_group=None, **kwargs):
+def run_workflows_added(
+    sender,
+    document: Document,
+    logging_group=None,
+    original_file=None,
+    **kwargs,
+):
     run_workflows(
-        WorkflowTrigger.WorkflowTriggerType.DOCUMENT_ADDED,
-        document,
-        logging_group,
+        trigger_type=WorkflowTrigger.WorkflowTriggerType.DOCUMENT_ADDED,
+        document=document,
+        logging_group=logging_group,
+        overrides=None,
+        original_file=original_file,
     )
 
 
 def run_workflows_updated(sender, document: Document, logging_group=None, **kwargs):
     run_workflows(
-        WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED,
-        document,
-        logging_group,
+        trigger_type=WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED,
+        document=document,
+        logging_group=logging_group,
     )
 
 
@@ -584,6 +596,7 @@ def run_workflows(
     document: Document | ConsumableDocument,
     logging_group=None,
     overrides: DocumentMetadataOverrides | None = None,
+    original_file: Path | None = None,
 ) -> tuple[DocumentMetadataOverrides, str] | None:
     """Run workflows which match a Document (or ConsumableDocument) for a specific trigger type.
 
@@ -897,21 +910,43 @@ def run_workflows(
             )
             return
 
-        title = (
-            document.title
-            if isinstance(document, Document)
-            else str(document.original_file)
-        )
-        doc_url = None
-        if isinstance(document, Document):
+        if not use_overrides:
+            title = document.title
             doc_url = f"{settings.PAPERLESS_URL}/documents/{document.pk}/"
-        correspondent = document.correspondent.name if document.correspondent else ""
-        document_type = document.document_type.name if document.document_type else ""
-        owner_username = document.owner.username if document.owner else ""
-        filename = document.original_filename or ""
-        current_filename = document.filename or ""
-        added = timezone.localtime(document.added)
-        created = timezone.localtime(document.created)
+            correspondent = (
+                document.correspondent.name if document.correspondent else ""
+            )
+            document_type = (
+                document.document_type.name if document.document_type else ""
+            )
+            owner_username = document.owner.username if document.owner else ""
+            filename = document.original_filename or ""
+            current_filename = document.filename or ""
+            added = timezone.localtime(document.added)
+            created = timezone.localtime(document.created)
+        else:
+            title = overrides.title if overrides.title else str(document.original_file)
+            doc_url = ""
+            correspondent = (
+                Correspondent.objects.filter(pk=overrides.correspondent_id).first()
+                if overrides.correspondent_id
+                else ""
+            )
+            document_type = (
+                DocumentType.objects.filter(pk=overrides.document_type_id).first().name
+                if overrides.document_type_id
+                else ""
+            )
+            owner_username = (
+                User.objects.filter(pk=overrides.owner_id).first().username
+                if overrides.owner_id
+                else ""
+            )
+            filename = document.original_file if document.original_file else ""
+            current_filename = filename
+            added = timezone.localtime(timezone.now())
+            created = timezone.localtime(overrides.created)
+
         subject = parse_w_workflow_placeholders(
             action.email.subject,
             correspondent,
@@ -946,7 +981,11 @@ def run_workflows(
                 # Something could be renaming the file concurrently so it can't be attached
                 with FileLock(settings.MEDIA_LOCK):
                     document.refresh_from_db()
-                    email.attach_file(document.source_path)
+                    email.attach_file(
+                        original_file
+                        if original_file is not None
+                        else document.source_path,
+                    )
             n_messages = email.send()
             logger.debug(
                 f"Sent {n_messages} notification email(s) to {action.email.to}",
@@ -959,44 +998,66 @@ def run_workflows(
             )
 
     def webhook_action():
-        title = (
-            document.title
-            if isinstance(document, Document)
-            else str(document.original_file)
-        )
-        doc_url = None
-        if isinstance(document, Document):
+        if not use_overrides:
+            title = document.title
             doc_url = f"{settings.PAPERLESS_URL}/documents/{document.pk}/"
-        correspondent = document.correspondent.name if document.correspondent else ""
-        document_type = document.document_type.name if document.document_type else ""
-        owner_username = document.owner.username if document.owner else ""
-        filename = document.original_filename or ""
-        current_filename = document.filename or ""
-        added = timezone.localtime(document.added)
-        created = timezone.localtime(document.created)
+            correspondent = (
+                document.correspondent.name if document.correspondent else ""
+            )
+            document_type = (
+                document.document_type.name if document.document_type else ""
+            )
+            owner_username = document.owner.username if document.owner else ""
+            filename = document.original_filename or ""
+            current_filename = document.filename or ""
+            added = timezone.localtime(document.added)
+            created = timezone.localtime(document.created)
+        else:
+            title = overrides.title if overrides.title else str(document.original_file)
+            doc_url = ""
+            correspondent = (
+                Correspondent.objects.filter(pk=overrides.correspondent_id).first()
+                if overrides.correspondent_id
+                else ""
+            )
+            document_type = (
+                DocumentType.objects.filter(pk=overrides.document_type_id).first().name
+                if overrides.document_type_id
+                else ""
+            )
+            owner_username = (
+                User.objects.filter(pk=overrides.owner_id).first().username
+                if overrides.owner_id
+                else ""
+            )
+            filename = document.original_file if document.original_file else ""
+            current_filename = filename
+            added = timezone.localtime(timezone.now())
+            created = timezone.localtime(overrides.created)
 
         try:
             data = {}
             if action.webhook.use_params:
-                try:
-                    for key, value in action.webhook.params.items():
-                        data[key] = parse_w_workflow_placeholders(
-                            value,
-                            correspondent,
-                            document_type,
-                            owner_username,
-                            added,
-                            filename,
-                            current_filename,
-                            created,
-                            title,
-                            doc_url,
+                if action.webhook.params:
+                    try:
+                        for key, value in action.webhook.params.items():
+                            data[key] = parse_w_workflow_placeholders(
+                                value,
+                                correspondent,
+                                document_type,
+                                owner_username,
+                                added,
+                                filename,
+                                current_filename,
+                                created,
+                                title,
+                                doc_url,
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"Error occurred parsing webhook params: {e}",
+                            extra={"group": logging_group},
                         )
-                except Exception as e:
-                    logger.error(
-                        f"Error occurred parsing webhook params: {e}",
-                        extra={"group": logging_group},
-                    )
             else:
                 data = parse_w_workflow_placeholders(
                     action.webhook.body,
@@ -1023,9 +1084,18 @@ def run_workflows(
                     )
             files = None
             if action.webhook.include_document:
-                with open(document.source_path, "rb") as f:
+                with open(
+                    original_file
+                    if original_file is not None
+                    else document.source_path,
+                    "rb",
+                ) as f:
                     files = {
-                        "file": (document.original_filename, f, document.mime_type),
+                        "file": (
+                            document.original_filename,
+                            f.read(),
+                            document.mime_type,
+                        ),
                     }
             send_webhook.delay(
                 url=action.webhook.url,

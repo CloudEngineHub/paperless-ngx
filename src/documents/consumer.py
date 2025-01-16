@@ -62,10 +62,10 @@ class WorkflowTriggerPlugin(
         Get overrides from matching workflows
         """
         overrides, msg = run_workflows(
-            WorkflowTrigger.WorkflowTriggerType.CONSUMPTION,
-            self.input_doc,
-            None,
-            DocumentMetadataOverrides(),
+            trigger_type=WorkflowTrigger.WorkflowTriggerType.CONSUMPTION,
+            document=self.input_doc,
+            logging_group=None,
+            overrides=DocumentMetadataOverrides(),
         )
         if overrides:
             self.metadata.update(overrides)
@@ -557,6 +557,9 @@ class ConsumerPlugin(
                     document=document,
                     logging_group=self.logging_group,
                     classifier=classifier,
+                    original_file=self.unmodified_original
+                    if self.unmodified_original
+                    else self.working_copy,
                 )
 
                 # After everything is in the database, copy the files into
